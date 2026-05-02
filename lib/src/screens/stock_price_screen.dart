@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:fl_chart/fl_chart.dart';
-import 'package:syncfusion_flutter_charts/charts.dart' hide ChartPoint, SelectionArgs;
 
 import '../providers/portfolio_provider.dart';
 import '../widgets/common_ui.dart';
@@ -68,8 +67,11 @@ class StockPriceScreen extends StatelessWidget {
                       if (!provider.isLoading && provider.priceData.isNotEmpty) ...[
                         const SizedBox(height: 40),
                         
-                        _buildSummaryTable("Portfolio A", provider.summaryA),
-                        _buildSummaryTable("Portfolio B", provider.summaryB),
+                        _buildDataRangeInfo(provider),
+                        const SizedBox(height: 30),
+                        
+                        _buildSummaryTable("Portfolio A", provider.summaryA, totalXirr: provider.totalXirrA),
+                        _buildSummaryTable("Portfolio B", provider.summaryB, totalXirr: provider.totalXirrB),
 
                         const SizedBox(height: 40),
 
@@ -198,18 +200,33 @@ class StockPriceScreen extends StatelessWidget {
   }
 
   Widget _buildDateSelectorRow(BuildContext context, PortfolioProvider provider) {
-    return Wrap(
-      spacing: 16, runSpacing: 16,
-      crossAxisAlignment: WrapCrossAlignment.center,
+    final isDateRangeInvalid = provider.startDate.isAfter(provider.endDate);
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildDatePickerField(context, "Start date", provider.startDate, (d) => provider.startDate = d),
-        _buildDatePickerField(context, "End date", provider.endDate, (d) => provider.endDate = d),
-        const SizedBox(width: 10),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.black, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 20), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4))),
-          onPressed: provider.isLoading ? null : provider.handlePlot, 
-          child: Text(provider.isLoading ? "Loading..." : "Plot", style: const TextStyle(fontWeight: FontWeight.bold)),
+        Wrap(
+          spacing: 16, runSpacing: 16,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            _buildDatePickerField(context, "Start date", provider.startDate, (d) => provider.startDate = d),
+            _buildDatePickerField(context, "End date", provider.endDate, (d) => provider.endDate = d),
+            const SizedBox(width: 10),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.black, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 20), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4))),
+              onPressed: (provider.isLoading || isDateRangeInvalid) ? null : provider.handlePlot, 
+              child: Text(provider.isLoading ? "Loading..." : "Plot", style: const TextStyle(fontWeight: FontWeight.bold)),
+            ),
+          ],
         ),
+        if (isDateRangeInvalid)
+          Padding(
+            padding: const EdgeInsets.only(top: 8.0),
+            child: Text(
+              "Start date must be before end date",
+              style: const TextStyle(color: Color(0xFFDC2626), fontSize: 13),
+            ),
+          ),
       ],
     );
   }
@@ -232,6 +249,143 @@ class StockPriceScreen extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildDataRangeInfo(PortfolioProvider provider) {
+    if (provider.originalTradingDays.isEmpty) return const SizedBox.shrink();
+    
+    // For each ticker, get its monthly breakdown using ONLY trading days
+    final tickerMonthlyData = <String, List<({int year, int month, DateTime startDate, double startPrice, DateTime endDate, double endPrice})>>{};
+
+    for (final entry in provider.originalTradingDays.entries) {
+      final ticker = entry.key;
+      final tradingDays = entry.value; // Only actual trading days, no weekends/holidays
+      
+      if (tradingDays.isEmpty) continue;
+
+      // Sort trading days
+      tradingDays.sort((a, b) => a.date.compareTo(b.date));
+
+      // Group trading days by month
+      final monthMap = <(int, int), List<ChartPoint>>{};
+      for (final point in tradingDays) {
+        final key = (point.date.year, point.date.month);
+        if (!monthMap.containsKey(key)) {
+          monthMap[key] = [];
+        }
+        monthMap[key]!.add(point);
+      }
+
+      // Sort months
+      final sortedMonths = monthMap.keys.toList()
+        ..sort((a, b) {
+          if (a.$1 != b.$1) return a.$1.compareTo(b.$1);
+          return a.$2.compareTo(b.$2);
+        });
+
+      final monthlyList = <({int year, int month, DateTime startDate, double startPrice, DateTime endDate, double endPrice})>[];
+      
+      for (int i = 0; i < sortedMonths.length; i++) {
+        final key = sortedMonths[i];
+        final points = monthMap[key]!;
+        
+        // First trading day on or after calendar month start
+        final calendarMonthStart = DateTime(key.$1, key.$2, 1);
+        late ChartPoint startPoint;
+        
+        // Look in current month first
+        var pointsOnOrAfterStart = points.where((p) => !p.date.isBefore(calendarMonthStart)).toList();
+        if (pointsOnOrAfterStart.isNotEmpty) {
+          startPoint = pointsOnOrAfterStart.first;
+        } else {
+          // If no trading day on or after month start, use first point of month
+          startPoint = points.first;
+        }
+        
+        // Last trading day on or after calendar month end
+        final nextMonth = key.$2 == 12 ? (key.$1 + 1, 1) : (key.$1, key.$2 + 1);
+        final calendarMonthEnd = DateTime(nextMonth.$1, nextMonth.$2, 1).subtract(Duration(days: 1));
+        late ChartPoint endPoint;
+        
+        // Look for trading day on or after month end date
+        final nextMonthData = i + 1 < sortedMonths.length ? monthMap[sortedMonths[i + 1]] : null;
+        final allFollowingDays = [...points];
+        if (nextMonthData != null) allFollowingDays.addAll(nextMonthData);
+        
+        var pointsOnOrAfterEnd = allFollowingDays.where((p) => !p.date.isBefore(calendarMonthEnd)).toList();
+        if (pointsOnOrAfterEnd.isNotEmpty) {
+          endPoint = pointsOnOrAfterEnd.first;
+        } else {
+          // If no trading day on or after month end, use last point of month
+          endPoint = points.last;
+        }
+
+        monthlyList.add((
+          year: key.$1,
+          month: key.$2,
+          startDate: startPoint.date,
+          startPrice: startPoint.value,
+          endDate: endPoint.date,
+          endPrice: endPoint.value,
+        ));
+      }
+
+      tickerMonthlyData[ticker] = monthlyList;
+    }
+
+    if (tickerMonthlyData.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return PageCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text("Monthly Trading Range by Ticker (Yahoo Finance)", 
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFF111827))),
+          const SizedBox(height: 20),
+          
+          // Display each ticker's monthly data
+          for (int i = 0; i < tickerMonthlyData.length; i++) ...[
+            if (i > 0) const SizedBox(height: 24),
+            Text(
+              tickerMonthlyData.keys.elementAt(i),
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF1F2937)),
+            ),
+            const SizedBox(height: 12),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                headingRowColor: WidgetStateProperty.all(const Color(0xFFF9FAFB)),
+                columnSpacing: 16,
+                columns: const [
+                  DataColumn(label: Text("Month")),
+                  DataColumn(label: Text("Month Start\n(Trading Day)")),
+                  DataColumn(label: Text("Start Price")),
+                  DataColumn(label: Text("Month End\n(Trading Day)")),
+                  DataColumn(label: Text("End Price")),
+                ],
+                rows: tickerMonthlyData.values.elementAt(i).map((m) {
+                  final monthName = DateFormat('MMM yyyy').format(DateTime(m.year, m.month));
+                  final startDateStr = DateFormat('dd MMM').format(m.startDate);
+                  final startPriceStr = '\$${m.startPrice.toStringAsFixed(2)}';
+                  final endDateStr = DateFormat('dd MMM').format(m.endDate);
+                  final endPriceStr = '\$${m.endPrice.toStringAsFixed(2)}';
+                  
+                  return DataRow(cells: [
+                    DataCell(Text(monthName, style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 12))),
+                    DataCell(Text(startDateStr, style: const TextStyle(fontSize: 11, color: Color(0xFF4B5563)))),
+                    DataCell(Text(startPriceStr, style: const TextStyle(fontSize: 11, color: Colors.blue, fontWeight: FontWeight.w600))),
+                    DataCell(Text(endDateStr, style: const TextStyle(fontSize: 11, color: Color(0xFF4B5563)))),
+                    DataCell(Text(endPriceStr, style: const TextStyle(fontSize: 11, color: Colors.green, fontWeight: FontWeight.w600))),
+                  ]);
+                }).toList(),
+              ),
+            ),
+          ]
+        ],
+      ),
     );
   }
 
@@ -264,14 +418,13 @@ class StockPriceScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildSummaryTable(String title, List<SummaryRow> rows) {
+  Widget _buildSummaryTable(String title, List<SummaryRow> rows, {double totalXirr = 0}) {
     if (rows.isEmpty) return const SizedBox.shrink();
     
-    // Aggregates for the footer summary matching your image
+    // Aggregates for the footer summary
     double totalInv = rows.fold(0, (sum, item) => sum + item.investment);
     double totalVal = rows.fold(0, (sum, item) => sum + item.endValue);
     double totalRet = totalInv > 0 ? ((totalVal - totalInv) / totalInv) * 100 : 0;
-    double avgXirr = rows.isEmpty ? 0 : rows.map((e) => e.xirr).reduce((a, b) => a + b) / rows.length;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -294,7 +447,7 @@ class StockPriceScreen extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 15),
-        // FOOTER SUMMARY logic added to match image_e3013c.jpg
+        // FOOTER SUMMARY with total XIRR
         Padding(
           padding: const EdgeInsets.only(left: 4),
           child: Text.rich(
@@ -311,8 +464,8 @@ class StockPriceScreen extends StatelessWidget {
                 ),
                 const TextSpan(text: " · XIRR: "),
                 TextSpan(
-                  text: "${avgXirr >= 0 ? '+' : ''}${avgXirr.toStringAsFixed(1)}%", 
-                  style: TextStyle(color: avgXirr >= 0 ? Colors.green : Colors.red, fontWeight: FontWeight.bold)
+                  text: "${totalXirr >= 0 ? '+' : ''}${totalXirr.toStringAsFixed(1)}%", 
+                  style: TextStyle(color: totalXirr >= 0 ? Colors.green : Colors.red, fontWeight: FontWeight.bold)
                 ),
               ],
             ),

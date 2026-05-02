@@ -18,6 +18,8 @@ class SwpPortfolioProvider extends ChangeNotifier {
   WithdrawalStrategy strategyA = WithdrawalStrategy(type: WithdrawalType.fixed, amount: 1000, growthPct: 0.5);
   WithdrawalStrategy strategyB = WithdrawalStrategy(type: WithdrawalType.percent, amount: 1, growthPct: 0);
 
+  Map<String, List<ChartPoint>> priceDataByTicker = {}; // For charts (filled with all days)
+  Map<String, List<ChartPoint>> originalTradingDays = {}; // Only trading days from Yahoo Finance
   Map<String, List<ChartPoint>> swpPortfolioValueData = {};
   Map<String, List<ChartPoint>> swpWithdrawalData = {};
   List<SwpBreakdownRow> breakdownRows = [];
@@ -40,18 +42,64 @@ class SwpPortfolioProvider extends ChangeNotifier {
     return last.value;
   }
 
+  double _getPriceOnOrAfter(List<ChartPoint>? data, DateTime target) {
+    if (data == null || data.isEmpty) return 0;
+    for (var p in data) {
+      if (!p.date.isBefore(target)) {
+        return p.value;
+      }
+    }
+    return data.last.value;
+  }
+
+  DateTime? _getFirstTradingDayOnOrAfter(List<ChartPoint>? data, DateTime calendarDate) {
+    if (data == null || data.isEmpty) return null;
+    for (var p in data) {
+      if (!p.date.isBefore(calendarDate)) {
+        return p.date;
+      }
+    }
+    return data.last.date;
+  }
+
   List<ChartPoint> _calculateSwpLogic(WithdrawalStrategy strategy, Map<String, double> unitsByTicker, List<DateTime> months, Map<String, List<ChartPoint>> priceData, String key) {
     List<ChartPoint> valueData = [];
     List<ChartPoint> withdrawData = [];
     Map<String, double> u = Map.from(unitsByTicker);
 
+    // FIRST: Add initial row for start of first month
+    DateTime firstMonthStart = DateTime.utc(months[0].year, months[0].month, 1, 12, 0, 0);
+    double initialValue = 0;
+    u.forEach((ticker, units) {
+      if (priceData.containsKey(ticker)) {
+        initialValue += units * _getPrice(priceData[ticker], firstMonthStart);
+      }
+    });
+    valueData.add(ChartPoint(firstMonthStart, initialValue));
+    withdrawData.add(ChartPoint(firstMonthStart, 0));
+
+    // THEN: Loop through each month for month-end values
     for (int i = 0; i < months.length; i++) {
-      DateTime mEnd = DateTime.utc(months[i].year, months[i].month + 1, 0);
-      double portfolioValue = 0;
+      // Get calendar month end - same logic as React's new Date(year, month+1, 0)
+      int year = months[i].year;
+      int month = months[i].month;
       
+      // Calculate next month for the month+1 operation
+      int nextMonth = month == 12 ? 1 : month + 1;
+      int nextYear = month == 12 ? year + 1 : year;
+      
+      // Create date as: new Date(year, nextMonth, 0) which gives last day of current month
+      // In Dart: DateTime(year, nextMonth, 0) doesn't work, so we use (year, nextMonth, 1) then subtract 1 day
+      DateTime firstOfNextMonth = DateTime.utc(nextYear, nextMonth, 1);
+      DateTime calendarMonthEnd = firstOfNextMonth.subtract(const Duration(days: 1));
+      
+      double portfolioValue = 0;
+      // Calculate portfolio value using filled data at calendar month-end (midnight UTC)
       u.forEach((ticker, units) {
         if (priceData.containsKey(ticker)) {
-          portfolioValue += units * _getPrice(priceData[ticker], mEnd);
+          double price = _getPrice(priceData[ticker], calendarMonthEnd);
+          double tickerValue = units * price;
+          portfolioValue += tickerValue;
         }
       });
 
@@ -60,7 +108,7 @@ class SwpPortfolioProvider extends ChangeNotifier {
         if (strategy.type == WithdrawalType.fixed) {
           withdrawAmount = math.min(strategy.amount, portfolioValue);
         } else if (strategy.type == WithdrawalType.fixedGrowth) {
-          withdrawAmount = math.min(strategy.amount * math.pow(1 + (strategy.growthPct / 100), i), portfolioValue);
+          withdrawAmount = math.min(strategy.amount * math.pow(1 + (strategy.growthPct / 100), i) as double, portfolioValue);
         } else {
           withdrawAmount = portfolioValue * (strategy.amount / 100);
         }
@@ -70,8 +118,9 @@ class SwpPortfolioProvider extends ChangeNotifier {
         double ratio = withdrawAmount / portfolioValue;
         u.updateAll((ticker, units) => units * (1 - ratio));
       }
-      valueData.add(ChartPoint(mEnd, portfolioValue - withdrawAmount));
-      withdrawData.add(ChartPoint(mEnd, withdrawAmount));
+      // Use calendar month end for the chart point
+      valueData.add(ChartPoint(calendarMonthEnd, portfolioValue - withdrawAmount));
+      withdrawData.add(ChartPoint(calendarMonthEnd, withdrawAmount));
     }
     swpWithdrawalData[key] = withdrawData;
     return valueData;
@@ -79,13 +128,14 @@ class SwpPortfolioProvider extends ChangeNotifier {
 
   Future<void> handleSimulate() async {
     isLoading = true; 
+    priceDataByTicker.clear();
+    originalTradingDays.clear();
     swpPortfolioValueData.clear();
     swpWithdrawalData.clear();
     breakdownRows.clear();
     notifyListeners();
 
     try {
-      Map<String, List<ChartPoint>> priceData = {};
       List<DateTime> months = [];
       DateTime temp = _startMonth;
       while (!temp.isAfter(_endMonth)) { 
@@ -93,24 +143,25 @@ class SwpPortfolioProvider extends ChangeNotifier {
         temp = DateTime.utc(temp.year, temp.month + 1, 1); 
       }
 
-      // CRITICAL FIX: Generate date strings for Service
-      final String sDateStr = DateFormat('yyyy-MM-01').format(_startMonth);
-      final String eDateStr = DateFormat('yyyy-MM-dd').format(
-          DateTime.utc(_endMonth.year, _endMonth.month + 1, 0)
-      );
+      if (months.isEmpty) return;
 
+      // Format dates for Yahoo Finance API
+      String sDateStr = "${months.first.year}-${months.first.month.toString().padLeft(2, '0')}-01";
+      DateTime lastDayDT = DateTime.utc(_endMonth.year, _endMonth.month + 1, 0);
+      String eDateStr = "${lastDayDT.year}-${lastDayDT.month.toString().padLeft(2, '0')}-${lastDayDT.day.toString().padLeft(2, '0')}";
+
+      // Fetch all tickers
       for (var e in corpusEntries) {
         final tName = e.ticker.trim().toUpperCase();
         if (tName.isNotEmpty) {
           try {
-            // FIX: Passing required startDate and endDate to service
-            final raw = await _service.fetchStockData(
-              tName, 
-              startDate: sDateStr, 
-              endDate: eDateStr
-            );
+            final raw = await _service.fetchStockData(tName, startDate: sDateStr, endDate: eDateStr);
             if (raw.isNotEmpty) {
-              priceData[tName] = DataUtils.fillMissingNavDates(raw);
+              // Store original trading days
+              originalTradingDays[tName] = raw;
+              
+              // Fill missing dates for charting
+              priceDataByTicker[tName] = DataUtils.fillMissingNavDates(raw);
             }
           } catch (err) {
             debugPrint("Ticker fetch failed for SWP: $tName");
@@ -118,13 +169,15 @@ class SwpPortfolioProvider extends ChangeNotifier {
         }
       }
 
-      if (priceData.isEmpty) throw "No price data found for tickers.";
+      if (priceDataByTicker.isEmpty) throw "No price data found for tickers.";
 
       Map<String, double> initialUnits = {};
       for (var e in corpusEntries) {
         final tName = e.ticker.trim().toUpperCase();
-        if (priceData.containsKey(tName)) {
-          double p = _getPrice(priceData[tName], months.first);
+        if (priceDataByTicker.containsKey(tName)) {
+          // Use calendar month start (1st at 12:00 UTC) for initial investment date
+          DateTime investDate = DateTime.utc(months.first.year, months.first.month, 1, 12, 0, 0);
+          double p = _getPrice(priceDataByTicker[tName], investDate);
           if (p > 0) {
             initialUnits[tName] = (double.tryParse(e.amount) ?? 0) / p;
           }
@@ -134,8 +187,9 @@ class SwpPortfolioProvider extends ChangeNotifier {
       if (initialUnits.isEmpty) throw "Initial portfolio value is zero.";
 
       // RUN CALCULATIONS
-      swpPortfolioValueData['Strategy A'] = _calculateSwpLogic(strategyA, initialUnits, months, priceData, 'Strategy A');
-      swpPortfolioValueData['Strategy B'] = _calculateSwpLogic(strategyB, initialUnits, months, priceData, 'Strategy B');
+      swpPortfolioValueData['Strategy A'] = _calculateSwpLogic(strategyA, initialUnits, months, priceDataByTicker, 'Strategy A');
+      swpPortfolioValueData['Strategy B'] = _calculateSwpLogic(strategyB, initialUnits, months, priceDataByTicker, 'Strategy B');
+
 
       final valA = swpPortfolioValueData['Strategy A'];
       final valB = swpPortfolioValueData['Strategy B'];
@@ -144,21 +198,22 @@ class SwpPortfolioProvider extends ChangeNotifier {
 
       if (valA != null && valB != null && withA != null && withB != null) {
         double cA = 0; double cB = 0;
-        for (int i = 0; i < months.length; i++) {
-          if (i < valA.length && i < valB.length) {
-            double wa = withA[i].value;
-            double wb = withB[i].value;
-            cA += wa; cB += wb;
-            breakdownRows.add(SwpBreakdownRow(
-              date: months[i], 
-              strategyAValue: valA[i].value, 
-              strategyAWithdrawal: wa, 
-              strategyACumulative: cA, 
-              strategyBValue: valB[i].value, 
-              strategyBWithdrawal: wb, 
-              strategyBCumulative: cB
-            ));
-          }
+        
+        // Build breakdown rows from the calculated data (valA, valB have same dates)
+        for (int i = 0; i < valA.length && i < valB.length; i++) {
+          double wa = withA[i].value;
+          double wb = withB[i].value;
+          cA += wa; cB += wb;
+          
+          breakdownRows.add(SwpBreakdownRow(
+            date: valA[i].date,  // Use the actual date from valueData (React uses the same)
+            strategyAValue: valA[i].value, 
+            strategyAWithdrawal: wa, 
+            strategyACumulative: cA, 
+            strategyBValue: valB[i].value, 
+            strategyBWithdrawal: wb, 
+            strategyBCumulative: cB
+          ));
         }
       }
     } catch (e) {

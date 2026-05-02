@@ -44,25 +44,44 @@ class _NetworthEstimatorCopyScreenState extends State<NetworthEstimatorCopyScree
   Map<String, List<ChartPoint>> _byTickerSeries = {};
   Map<String, List<ChartPoint>> _normalizedSeries = {};
 
-  void _processData(Map<String, List<ChartPoint>> rawPrices) {
+  void _processData(Map<String, List<ChartPoint>> rawPrices, DateTime startDate, DateTime endDate) {
     _byTickerSeries.clear();
     _totalNetWorth.clear();
     _normalizedSeries.clear();
 
     if (rawPrices.isEmpty) return;
 
-    final firstTickerWithData = rawPrices.keys.firstWhere((k) => rawPrices[k]!.isNotEmpty);
-    final commonDates = rawPrices[firstTickerWithData]!.map((p) => p.date).toList()..sort();
+    // Filter each series by date range first (matching React's filterSeriesInRange logic)
+    final filteredSeries = <String, List<ChartPoint>>{};
+    for (var entry in rawPrices.entries) {
+      final filtered = entry.value
+          .where((p) => p.date.isAfter(startDate.subtract(const Duration(seconds: 1))) && 
+                        p.date.isBefore(endDate.add(const Duration(seconds: 1))))
+          .toList()
+          ..sort((a, b) => a.date.compareTo(b.date));
+      if (filtered.isNotEmpty) {
+        filteredSeries[entry.key] = filtered;
+      }
+    }
+
+    if (filteredSeries.isEmpty) return;
+
+    // Collect unique dates from all tickers within the filtered range
+    final dateSet = <DateTime>{};
+    for (var series in filteredSeries.values) {
+      for (var point in series) {
+        dateSet.add(point.date);
+      }
+    }
+    final commonDates = dateSet.toList()..sort((a, b) => a.compareTo(b));
 
     if (commonDates.isEmpty) return;
 
-    // FIX: Normalization base price selection (React Logic Match)
-    // Stock price-ah dhaan base-ah (100) veikkanum, Net worth value-ah illa.
+    // Base prices from first available point in filtered range
     Map<String, double> basePrices = {};
-    for (var ticker in rawPrices.keys) {
-      if (rawPrices[ticker]!.isNotEmpty) {
-        // Range-oda first available price-ah base-ah yedukirom
-        basePrices[ticker] = rawPrices[ticker]!.first.value;
+    for (var ticker in filteredSeries.keys) {
+      if (filteredSeries[ticker]!.isNotEmpty) {
+        basePrices[ticker] = filteredSeries[ticker]!.first.value;
       }
     }
 
@@ -72,10 +91,11 @@ class _NetworthEstimatorCopyScreenState extends State<NetworthEstimatorCopyScree
         String t = row.ticker.trim().toUpperCase();
         double u = double.tryParse(row.unitsController.text) ?? 0;
         
-        if (t.isNotEmpty && rawPrices.containsKey(t)) {
-          final pricePoint = rawPrices[t]!.firstWhere(
-            (p) => p.date.isAtSameMomentAs(date),
-            orElse: () => rawPrices[t]!.firstWhere((p) => p.date.isAfter(date), orElse: () => rawPrices[t]!.last)
+        if (t.isNotEmpty && u > 0 && filteredSeries.containsKey(t) && filteredSeries[t]!.isNotEmpty) {
+          // Finding price for exact date or closest one after
+          final pricePoint = filteredSeries[t]!.firstWhere(
+            (p) => p.date.isAtSameMomentAs(date) || p.date.isAfter(date),
+            orElse: () => filteredSeries[t]!.last
           );
           
           double currentPrice = pricePoint.value;
@@ -84,8 +104,7 @@ class _NetworthEstimatorCopyScreenState extends State<NetworthEstimatorCopyScree
           
           _byTickerSeries.putIfAbsent(t, () => []).add(ChartPoint(date, val));
 
-          // FIX: RELATIVE PERFORMANCE (Indexed to 100)
-          // Formula: (Current Price / Starting Price) * 100
+          // Relative performance (indexed to 100) - normalized to base price from filtered range
           if (basePrices.containsKey(t) && basePrices[t] != 0) {
             double normalizedValue = (currentPrice / basePrices[t]!) * 100;
             _normalizedSeries.putIfAbsent(t, () => []).add(ChartPoint(date, normalizedValue));
@@ -113,6 +132,7 @@ class _NetworthEstimatorCopyScreenState extends State<NetworthEstimatorCopyScree
       for (var row in _rows) {
         String t = row.ticker.trim().toUpperCase();
         if (t.isNotEmpty && !rawPrices.containsKey(t)) {
+          // Fetch without padding (matching React copy page)
           var data = await _service.fetchStockData(t, 
             startDate: DateFormat('yyyy-MM-dd').format(_startDate),
             endDate: DateFormat('yyyy-MM-dd').format(_endDate)
@@ -124,7 +144,7 @@ class _NetworthEstimatorCopyScreenState extends State<NetworthEstimatorCopyScree
       if (rawPrices.isEmpty) {
         setState(() => _error = "Could not find price data for these tickers.");
       } else {
-        _processData(rawPrices);
+        _processData(rawPrices, _startDate, _endDate);
         
         final payload = {
           'holdings': _rows.map((r) => {'ticker': r.ticker, 'units': r.unitsController.text}).toList(),

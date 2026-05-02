@@ -36,16 +36,44 @@ class _NetworthEstimatorScreenState extends State<NetworthEstimatorScreen> {
   Map<String, List<ChartPoint>> _byTickerSeries = {};
   Map<String, List<ChartPoint>> _normalizedSeries = {};
 
-  void _processData(Map<String, List<ChartPoint>> rawPrices) {
+  void _processData(Map<String, List<ChartPoint>> rawPrices, DateTime startDate, DateTime endDate) {
     _byTickerSeries.clear();
     _totalNetWorth.clear();
     _normalizedSeries.clear();
 
     if (rawPrices.isEmpty) return;
 
-    // Get a common list of dates from any ticker that has data
-    final firstTickerWithData = rawPrices.keys.firstWhere((k) => rawPrices[k]!.isNotEmpty);
-    final commonDates = rawPrices[firstTickerWithData]!.map((p) => p.date).toList();
+    // Filter each series by date range first (matching React's filterSeriesInRange logic)
+    final filteredSeries = <String, List<ChartPoint>>{};
+    for (var entry in rawPrices.entries) {
+      final filtered = entry.value
+          .where((p) => p.date.isAfter(startDate.subtract(const Duration(seconds: 1))) && 
+                        p.date.isBefore(endDate.add(const Duration(seconds: 1))))
+          .toList()
+          ..sort((a, b) => a.date.compareTo(b.date));
+      if (filtered.isNotEmpty) {
+        filteredSeries[entry.key] = filtered;
+      }
+    }
+
+    if (filteredSeries.isEmpty) return;
+
+    // Collect unique dates from all tickers within the filtered range
+    final dateSet = <DateTime>{};
+    for (var series in filteredSeries.values) {
+      for (var point in series) {
+        dateSet.add(point.date);
+      }
+    }
+    final commonDates = dateSet.toList()..sort((a, b) => a.compareTo(b));
+
+    // Base prices from first available point in filtered range
+    Map<String, double> basePrices = {};
+    for (var ticker in filteredSeries.keys) {
+      if (filteredSeries[ticker]!.isNotEmpty) {
+        basePrices[ticker] = filteredSeries[ticker]!.first.value;
+      }
+    }
 
     for (var date in commonDates) {
       double dayTotal = 0;
@@ -53,32 +81,29 @@ class _NetworthEstimatorScreenState extends State<NetworthEstimatorScreen> {
         String t = row.ticker.trim().toUpperCase();
         double u = double.tryParse(row.unitsController.text) ?? 0;
         
-        // SAFE CHECK: Ensuring ticker data exists in rawPrices before accessing
-        if (t.isNotEmpty && u > 0 && rawPrices.containsKey(t) && rawPrices[t]!.isNotEmpty) {
-          // Finding price for exact date or closest one
-          final pricePoint = rawPrices[t]!.firstWhere(
+        // Use filteredSeries instead of rawPrices to respect date range
+        if (t.isNotEmpty && u > 0 && filteredSeries.containsKey(t) && filteredSeries[t]!.isNotEmpty) {
+          // Finding price for exact date or closest one after
+          final pricePoint = filteredSeries[t]!.firstWhere(
             (p) => p.date.isAtSameMomentAs(date) || p.date.isAfter(date),
-            orElse: () => rawPrices[t]!.last
+            orElse: () => filteredSeries[t]!.last
           );
           
-          double val = u * pricePoint.value;
+          double currentPrice = pricePoint.value;
+          double val = u * currentPrice;
           dayTotal += val;
 
           _byTickerSeries.putIfAbsent(t, () => []).add(ChartPoint(date, val));
+
+          // Relative performance (indexed to 100) - normalized to base price from filtered range
+          if (basePrices.containsKey(t) && basePrices[t] != 0) {
+            double normalizedValue = (currentPrice / basePrices[t]!) * 100;
+            _normalizedSeries.putIfAbsent(t, () => []).add(ChartPoint(date, normalizedValue));
+          }
         }
       }
       _totalNetWorth.add(ChartPoint(date, dayTotal));
     }
-
-    // Performance Indexed to 100 logic
-    _byTickerSeries.forEach((ticker, data) {
-      if (data.isNotEmpty) {
-        double startVal = data.first.value;
-        if (startVal != 0) {
-          _normalizedSeries[ticker] = data.map((p) => ChartPoint(p.date, (p.value / startVal) * 100)).toList();
-        }
-      }
-    });
   }
 
   Future<void> _handleLoadChart() async {
@@ -109,7 +134,7 @@ class _NetworthEstimatorScreenState extends State<NetworthEstimatorScreen> {
       if (rawPrices.isEmpty) {
         setState(() => _error = "Could not find price data for these tickers.");
       } else {
-        _processData(rawPrices);
+        _processData(rawPrices, _startDate, _endDate);
         setState(() {}); // Trigger UI update after processing
       }
     } catch (e) {

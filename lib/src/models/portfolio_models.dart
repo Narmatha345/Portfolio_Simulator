@@ -1,13 +1,17 @@
 class ChartPoint {
   final DateTime date;
   final double value;
+  final double? high;
+  final double? low;
 
-  ChartPoint(this.date, this.value);
+  ChartPoint(this.date, this.value, {this.high, this.low});
 
   // Gemini payload-kaga JSON conversion
   Map<String, dynamic> toJson() => {
     'date': date.toIso8601String(),
     'value': value,
+    'high': high,
+    'low': low,
   };
 }
 

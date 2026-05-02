@@ -45,9 +45,18 @@ class _WeeklyStockPriceScreenState extends State<WeeklyStockPriceScreen> {
 
     List<Map<String, dynamic>> results = [];
     grouped.forEach((key, points) {
-      // Direct high/low values within the grouping
-      double highVal = points.map((e) => e.value).reduce((a, b) => a > b ? a : b);
-      double lowVal = points.map((e) => e.value).reduce((a, b) => a < b ? a : b);
+      // Use actual high/low values from Yahoo Finance data
+      // High = Maximum high price from all trading days in this period
+      // Low = Minimum low price from all trading days in this period
+      double highVal = points
+          .where((p) => p.high != null)
+          .map((e) => e.high!)
+          .reduce((a, b) => a > b ? a : b);
+      
+      double lowVal = points
+          .where((p) => p.low != null)
+          .map((e) => e.low!)
+          .reduce((a, b) => a < b ? a : b);
       
       results.add({
         'date': DateTime.parse(_viewType == ViewType.weekly ? key : "$key-01"),

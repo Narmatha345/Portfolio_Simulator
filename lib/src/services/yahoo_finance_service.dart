@@ -24,6 +24,8 @@ class YahooFinanceService {
 
     final List timestamps = chartResult['timestamp'] ?? [];
     final List adjClose = chartResult['indicators']['adjclose'][0]['adjclose'] ?? [];
+    final List highPrices = chartResult['indicators']['quote'][0]['high'] ?? [];
+    final List lowPrices = chartResult['indicators']['quote'][0]['low'] ?? [];
 
     List<ChartPoint> points = [];
     for (int i = 0; i < timestamps.length; i++) {
@@ -38,6 +40,8 @@ class YahooFinanceService {
         points.add(ChartPoint(
           syncDate,
           (adjClose[i] as num).toDouble(),
+          high: highPrices[i] != null ? (highPrices[i] as num).toDouble() : null,
+          low: lowPrices[i] != null ? (lowPrices[i] as num).toDouble() : null,
         ));
       }
     }

@@ -170,7 +170,7 @@ class StockSipScreen extends StatelessWidget {
     double totalInv = rows.fold(0, (sum, item) => sum + item.invested);
     double totalVal = rows.fold(0, (sum, item) => sum + item.endValue);
     double totalRet = totalInv > 0 ? ((totalVal - totalInv) / totalInv) * 100 : 0;
-    double avgXirr = rows.isEmpty ? 0 : rows.map((e) => e.xirr).reduce((a, b) => a + b) / rows.length;
+    double portfolioXirr = rows.isNotEmpty ? rows[0].xirr : 0; // Portfolio XIRR stored in first row
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -206,7 +206,7 @@ class StockSipScreen extends StatelessWidget {
           TextSpan(text: "\$${f.format(totalVal)} ", style: const TextStyle(fontWeight: FontWeight.bold)),
           TextSpan(text: "(${totalRet >= 0 ? '+' : ''}${totalRet.toStringAsFixed(2)}%)", style: TextStyle(color: totalRet >= 0 ? const Color(0xFF16A34A) : Colors.red, fontWeight: FontWeight.bold)),
           const TextSpan(text: "  ·  XIRR: "),
-          TextSpan(text: "${avgXirr.toStringAsFixed(2)}%", style: const TextStyle(color: Color(0xFF0D9488), fontWeight: FontWeight.bold)),
+          TextSpan(text: "${portfolioXirr.toStringAsFixed(2)}%", style: const TextStyle(color: Color(0xFF0D9488), fontWeight: FontWeight.bold)),
         ])),
       ],
     );
