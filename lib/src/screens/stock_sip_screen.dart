@@ -206,7 +206,7 @@ class StockSipScreen extends StatelessWidget {
           TextSpan(text: "\$${f.format(totalVal)} ", style: const TextStyle(fontWeight: FontWeight.bold)),
           TextSpan(text: "(${totalRet >= 0 ? '+' : ''}${totalRet.toStringAsFixed(2)}%)", style: TextStyle(color: totalRet >= 0 ? const Color(0xFF16A34A) : Colors.red, fontWeight: FontWeight.bold)),
           const TextSpan(text: "  ·  XIRR: "),
-          TextSpan(text: "${portfolioXirr.toStringAsFixed(2)}%", style: const TextStyle(color: Color(0xFF0D9488), fontWeight: FontWeight.bold)),
+          TextSpan(text: "${(portfolioXirr * 100).toStringAsFixed(2)}%", style: const TextStyle(color: Color(0xFF0D9488), fontWeight: FontWeight.bold)),
         ])),
       ],
     );

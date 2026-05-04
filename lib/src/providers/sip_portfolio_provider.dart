@@ -118,50 +118,159 @@ class SipPortfolioProvider extends ChangeNotifier {
     return data.last.date;
   }
 
-  /// Calculate NPV for a given rate (using fractional days from milliseconds like React)
+  /// Get month-end price: check if month-end date (30 or 31) is a trading day
+  /// If YES, use it. If NO (weekend/holiday), use next available trading day after it
+  /// Returns both price and actual date used
+  (double price, DateTime actualDate)? _getMonthEndPrice(List<ChartPoint> data, DateTime calendarMonthEnd) {
+    if (data.isEmpty) return null;
+    
+    DateTime monthEndDateOnly = DateTime.utc(calendarMonthEnd.year, calendarMonthEnd.month, calendarMonthEnd.day);
+    
+    // Step 1: Check if the month-end date (30 or 31) itself is a trading day
+    for (var p in data) {
+      DateTime pDateOnly = DateTime.utc(p.date.year, p.date.month, p.date.day);
+      if (pDateOnly.isAtSameMomentAs(monthEndDateOnly)) {
+        return (p.value, p.date); // Month-end is a trading day, use it
+      }
+    }
+    
+    // Step 2: Month-end is not a trading day (weekend/holiday)
+    // Find next available trading day after month-end
+    for (var p in data) {
+      DateTime pDateOnly = DateTime.utc(p.date.year, p.date.month, p.date.day);
+      if (pDateOnly.isAfter(monthEndDateOnly)) {
+        return (p.value, p.date); // Use next available trading day
+      }
+    }
+    
+    // Step 3: No trading days after month-end, use last available
+    if (data.isNotEmpty) {
+      final lastPoint = data.last;
+      return (lastPoint.value, lastPoint.date);
+    }
+    
+    return null;
+  }
+
+  /// Get first available trading day in the given month
+  /// Returns both price and actual date used
+  (double price, DateTime actualDate)? _getMonthStartPrice(List<ChartPoint> data, DateTime calendarMonthStart) {
+    if (data.isEmpty) return null;
+    
+    int targetMonth = calendarMonthStart.month;
+    int targetYear = calendarMonthStart.year;
+    
+    // Find first trading day within the target month
+    for (var p in data) {
+      if (p.date.year == targetYear && p.date.month == targetMonth) {
+        return (p.value, p.date); // First trading day in this month
+      }
+    }
+    
+    return null;
+  }
+
+  /// Calculate NPV for a given rate (using fractional days from milliseconds, matching XIRR standard)
+  /// Formula: NPV = Σ(cashFlow / (1 + rate)^years)
   double _calculateNpv(List<CashFlow> cashFlows, double rate) {
     if (cashFlows.isEmpty) return 0;
+    if (rate <= -1.0) return double.infinity; // rate must be > -100%
+    
     final firstDate = cashFlows.first.date;
     double npv = 0;
     const msPerDay = 86400000.0;
     
     for (var cf in cashFlows) {
       final ms = cf.date.difference(firstDate).inMilliseconds.toDouble();
-      final years = ms / msPerDay / 365.0;
-      final discount = math.pow(1 + rate, years) as double;
-      npv += cf.amount / discount;
+      final years = ms / msPerDay / 365.25; // Use 365.25 days (matches React xirr library)
+      final discountFactor = math.pow(1 + rate, years) as double;
+      npv += cf.amount / discountFactor;
     }
     
     return npv;
   }
 
-  /// Calculate NPV derivative for Newton-Raphson (using fractional days)
+  /// Calculate NPV derivative for Newton-Raphson
+  /// Formula: NPV' = Σ(-years * cashFlow / ((1 + rate)^(years+1)))
   double _calculateNpvDerivative(List<CashFlow> cashFlows, double rate) {
     if (cashFlows.isEmpty) return 0;
+    if (rate <= -1.0) return 0;
+    
     final firstDate = cashFlows.first.date;
     double derivative = 0;
     const msPerDay = 86400000.0;
     
     for (var cf in cashFlows) {
       final ms = cf.date.difference(firstDate).inMilliseconds.toDouble();
-      final years = ms / msPerDay / 365.0;
-      final discount = math.pow(1 + rate, years) as double;
-      derivative += -years * cf.amount / (discount * (1 + rate));
+      final years = ms / msPerDay / 365.25; // Use 365 days (Excel XIRR standard, matches React xirr library)
+      final discountFactor = math.pow(1 + rate, years + 1) as double;
+      derivative += -years * cf.amount / discountFactor;
     }
     
     return derivative;
   }
 
-  /// Calculate XIRR using Newton-Raphson method (standard XIRR algorithm)
+  /// Calculate XIRR using Newton-Raphson method (matches standard Excel XIRR algorithm)
+  /// Returns XIRR as a decimal (0.10 for 10%), not percentage
   double? _calculateXirrFromCashFlows(List<CashFlow> cashFlows) {
     if (cashFlows.isEmpty || cashFlows.length < 2) return null;
     
     // Sort by date
     cashFlows.sort((a, b) => a.date.compareTo(b.date));
     
-    // Try multiple initial guesses to find best convergence
-    // Include common XIRR ranges
-    List<double> guesses = [0.1, 0.15, 0.2, 0.25, 0.275, 0.3, 0.05, 0.0, -0.05];
+    // Validate: must have at least one positive and one negative cash flow
+    bool hasPositive = cashFlows.any((cf) => cf.amount > 0);
+    bool hasNegative = cashFlows.any((cf) => cf.amount < 0);
+    if (!hasPositive || !hasNegative) return null;
+    
+    // Use bisection method for guaranteed exact convergence to machine precision
+    // Find bracket where NPV changes sign
+    double? rateLow;
+    double? rateHigh;
+    
+    // Search wider range for bracket
+    for (double r = -0.99; r <= 10.0; r += 0.05) {
+      final npvLow = _calculateNpv(cashFlows, r);
+      final npvHigh = _calculateNpv(cashFlows, r + 0.05);
+      
+      // Skip if either NPV is infinite (rate <= -1.0)
+      if (npvLow.isInfinite || npvHigh.isInfinite) continue;
+      
+      if (npvLow * npvHigh < 0) { // Sign changed - found bracket!
+        rateLow = r;
+        rateHigh = r + 0.05;
+        break;
+      }
+    }
+    
+    // If we found a bracket, use bisection for exact convergence
+    if (rateLow != null && rateHigh != null) {
+      double low = rateLow;
+      double high = rateHigh;
+      
+      // Bisection iterations - at least 100 for very high precision
+      for (int iter = 0; iter < 200; iter++) {
+        final mid = (low + high) / 2;
+        final npvMid = _calculateNpv(cashFlows, mid);
+        
+        // Stop if converged to machine precision
+        if (npvMid.abs() < 1e-15 || (high - low).abs() < 1e-16) {
+          return mid;
+        }
+        
+        final npvLow = _calculateNpv(cashFlows, low);
+        if (npvLow * npvMid < 0) {
+          high = mid;
+        } else {
+          low = mid;
+        }
+      }
+      
+      return (low + high) / 2;
+    }
+    
+    // Fallback: try Newton-Raphson from multiple guesses if no bracket found
+    List<double> guesses = [0.20, 0.10, 0.15, 0.25, 0.30, 0.05, 0.0, -0.05, 0.35, 0.40];
     
     double? bestRate;
     double? bestNpv;
@@ -169,47 +278,35 @@ class SipPortfolioProvider extends ChangeNotifier {
     for (double guess in guesses) {
       double rate = guess;
       
-      for (int i = 0; i < 1000; i++) {
+      for (int iter = 0; iter < 500; iter++) {
         final npv = _calculateNpv(cashFlows, rate);
+        final npvAbsValue = npv.abs();
         
-        // Check convergence - very tight tolerance
-        if (npv.abs() < 1e-14) {
-          if (bestNpv == null || npv.abs() < bestNpv.abs()) {
-            bestRate = rate;
-            bestNpv = npv;
-          }
-          break;
+        if (bestNpv == null || npvAbsValue < bestNpv) {
+          bestRate = rate;
+          bestNpv = npvAbsValue;
+        }
+        
+        if (npvAbsValue < 1e-15) {
+          return rate;
         }
         
         final derivative = _calculateNpvDerivative(cashFlows, rate);
-        
-        if (derivative.abs() < 1e-10) {
-          // Derivative too small, can't continue
-          break;
-        }
+        if (derivative.abs() < 1e-12) break;
         
         final newRate = rate - (npv / derivative);
-        
-        // Check if converged
-        if ((newRate - rate).abs() < 1e-14) {
-          final finalNpv = _calculateNpv(cashFlows, newRate);
-          if (bestNpv == null || finalNpv.abs() < bestNpv.abs()) {
-            bestRate = newRate;
-            bestNpv = finalNpv;
-          }
-          break;
-        }
+        if (newRate <= -0.99 || newRate > 10.0) break;
+        if ((newRate - rate).abs() < 1e-15) break;
         
         rate = newRate;
-        
-        // Prevent runaway
-        if (rate > 10 || rate < -0.99) {
-          break;
-        }
       }
     }
     
-    return bestRate != null ? bestRate * 100 : null;
+    if (bestNpv != null && bestNpv < 1e-10 && bestRate != null) {
+      return bestRate;
+    }
+    
+    return null;
   }
 
   Future<void> handlePlot() async {
@@ -296,23 +393,19 @@ class SipPortfolioProvider extends ChangeNotifier {
             final tradingDays = originalTradingDays[e.ticker]!;
             if (tradingDays.isEmpty) continue;
 
-            // Find first trading day on or after month start
-            DateTime? tradingMonthStart = _getFirstTradingDayOnOrAfter(tradingDays, monthStart);
-            if (tradingMonthStart != null && (firstSipDate == null || tradingMonthStart.isBefore(firstSipDate))) {
-              firstSipDate = tradingMonthStart;
-            }
-            if (tradingMonthStart != null) {
-              actualMonthStartDate = tradingMonthStart;
+            // Get first trading day price in this month
+            final monthStartResult = _getMonthStartPrice(tradingDays, monthStart);
+            if (monthStartResult != null) {
+              if (firstSipDate == null || monthStartResult.$2.isBefore(firstSipDate)) {
+                firstSipDate = monthStartResult.$2;
+              }
             }
 
-            // For month end pricing, use calendar date directly (like React)
-            // Don't convert to trading date - let getPriceOnOrAfter handle forward-fill
             if (lastSipDate == null || calendarMonthEnd.isAfter(lastSipDate)) {
               lastSipDate = calendarMonthEnd;
             }
 
-            final filledData = priceDataByTicker[e.ticker]!;
-            double buyPrice = _getPrice(filledData, actualMonthStartDate);
+            double buyPrice = monthStartResult?.$1 ?? 0;
             double amt = double.tryParse(e.amount) ?? 0.0;
             
             if (buyPrice > 0 && amt > 0) {
@@ -324,16 +417,24 @@ class SipPortfolioProvider extends ChangeNotifier {
           
           totalCumInvested += mInvest;
           
-          // Calculate portfolio value at month end (calendar month end at 23:59:59 like React)
+          // Calculate portfolio value at month end (last trading day of month or next trading day)
           double curPortVal = 0;
-          final filledEndData = priceDataByTicker;
-          cumUnits.forEach((t, u) {
-            if (filledEndData.containsKey(t)) {
-              curPortVal += u * _getPriceOnOrAfter(filledEndData[t]!, actualMonthEndDate);
+          DateTime? actualPricingDate;
+          cumUnits.forEach((ticker, units) {
+            if (priceDataByTicker.containsKey(ticker) && originalTradingDays.containsKey(ticker)) {
+              final tradingDaysData = originalTradingDays[ticker]!; // Use original trading days only
+              final result = _getMonthEndPrice(tradingDaysData, actualMonthEndDate);
+              if (result != null) {
+                curPortVal += units * result.$1; // price
+                // Use the FIRST (earliest) pricing date found
+                if (actualPricingDate == null || result.$2.isBefore(actualPricingDate!)) {
+                  actualPricingDate = result.$2;
+                }
+              }
             }
           });
-          // Use calendar month end at 23:59:59 UTC like React
-          DateTime monthEndFull = DateTime.utc(actualMonthEndDate.year, actualMonthEndDate.month, actualMonthEndDate.day, 23, 59, 59);
+          // Use actual trading date found (month-end if trading day, or next available trading day)
+          DateTime monthEndFull = actualPricingDate ?? DateTime.utc(actualMonthEndDate.year, actualMonthEndDate.month, actualMonthEndDate.day, 23, 59, 59);
           valuePts.add(ChartPoint(monthEndFull, curPortVal));
 
           // Build breakdown rows
@@ -341,12 +442,22 @@ class SipPortfolioProvider extends ChangeNotifier {
             if (e.ticker.isEmpty) continue;
             if (!originalTradingDays.containsKey(e.ticker)) continue;
             
-            final filledData = priceDataByTicker[e.ticker]!;
-            if (filledData.isEmpty) continue;
+            final tradingDaysData = originalTradingDays[e.ticker]!; // Use original trading days only
+            if (tradingDaysData.isEmpty) continue;
 
-            double buyP = _getPrice(filledData, actualMonthStartDate);
+            double buyP = 0;
+            final monthStartResult = _getMonthStartPrice(tradingDaysData, monthStart);
+            if (monthStartResult != null) {
+              buyP = monthStartResult.$1;
+            }
+            
             double sipAmt = double.tryParse(e.amount) ?? 0;
-            double monthEndPrice = _getPriceOnOrAfter(filledData, actualMonthEndDate);
+            double monthEndPrice = 0;
+            // Use original trading days data to find month-end price, not filled interpolated data
+            final monthEndResult = _getMonthEndPrice(tradingDaysData, actualMonthEndDate);
+            if (monthEndResult != null) {
+              monthEndPrice = monthEndResult.$1;
+            }
             
             currentBreakdown.add(SipBreakdownRow(
               month: "${mDate.year}-${mDate.month.toString().padLeft(2, '0')}",
@@ -368,6 +479,20 @@ class SipPortfolioProvider extends ChangeNotifier {
         Map<String, double> uniqueCashFlowsByDateStr = {}; // Keyed by YYYY-MM-DD
         double totalEndValue = 0;
         
+        // Calculate the calendar end date first (for consistent end value calculation)
+        final lastMonth = months.last;
+        final nextMonth = lastMonth.month == 12 
+          ? DateTime.utc(lastMonth.year + 1, 1, 1) 
+          : DateTime.utc(lastMonth.year, lastMonth.month + 1, 1);
+        final calendarMonthEndDate = nextMonth.subtract(Duration(days: 1));
+        
+        final endDate = DateTime.utc(
+          calendarMonthEndDate.year,
+          calendarMonthEndDate.month,
+          calendarMonthEndDate.day,
+          23, 59, 59
+        );
+        
         // Build summary rows 
         for (var e in portfolios[i].entries) {
           if (e.ticker.isEmpty) continue;
@@ -377,9 +502,10 @@ class SipPortfolioProvider extends ChangeNotifier {
           double monthlyAmt = double.tryParse(e.amount) ?? 0;
           double invested = monthlyAmt * months.length;
           
+          // Get price AT END DATE (not last price in valuePts)
           double lastPrice = 0;
-          if (priceDataByTicker.containsKey(e.ticker) && valuePts.isNotEmpty) {
-            lastPrice = _getPriceOnOrAfter(priceDataByTicker[e.ticker]!, valuePts.last.date);
+          if (priceDataByTicker.containsKey(e.ticker)) {
+            lastPrice = _getPriceOnOrAfter(priceDataByTicker[e.ticker]!, endDate);
           }
           double endVal = units * lastPrice;
           totalEndValue += endVal;
@@ -416,18 +542,17 @@ class SipPortfolioProvider extends ChangeNotifier {
           
           // Add deduplicated cash flows (each date only once, with combined amount)
           for (var entry in uniqueCashFlowsByDateStr.entries) {
-            DateTime date = DateTime.parse(entry.key + 'T12:00:00Z');
+            // Parse as UTC midnight (matching React: new Date(d) where d is YYYY-MM-DD string)
+            DateTime date = DateTime.utc(
+              int.parse(entry.key.substring(0, 4)),  // YYYY
+              int.parse(entry.key.substring(5, 7)),  // MM
+              int.parse(entry.key.substring(8, 10))  // DD
+            );
             xirrCashFlows.add(CashFlow(date: date, amount: entry.value));
           }
           
-          // Add final portfolio value at end date
-          final endDateFull = DateTime.utc(
-            valuePts.last.date.year,
-            valuePts.last.date.month,
-            valuePts.last.date.day,
-            23, 59, 59
-          );
-          xirrCashFlows.add(CashFlow(date: endDateFull, amount: totalEndValue));
+          // Add final portfolio value at calendar month end (matching React behavior)
+          xirrCashFlows.add(CashFlow(date: endDate, amount: totalEndValue));
           
           // Sort by date (like React does)
           xirrCashFlows.sort((a, b) => a.date.compareTo(b.date));

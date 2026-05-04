@@ -221,6 +221,62 @@ class StockSwpScreen extends StatelessWidget {
             ])).toList()
           )
         ),
+        _buildMonthPriceTable(p, f),
+      ],
+    );
+  }
+
+  Widget _buildMonthPriceTable(SwpPortfolioProvider p, NumberFormat f) {
+    if (p.monthPriceRows.isEmpty) return const SizedBox.shrink();
+    
+    // Get all unique tickers
+    Set<String> allTickers = {};
+    for (var row in p.monthPriceRows) {
+      allTickers.addAll(row.prices.keys);
+    }
+    List<String> sortedTickers = allTickers.toList()..sort();
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 40),
+        const Text("Month-End Prices (Used for Calculation)", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 19)),
+        const SizedBox(height: 10),
+        const Text("Shows the price and trading date used for each ticker at month-end", style: TextStyle(fontSize: 13, color: Color(0xFF6B7280))),
+        const SizedBox(height: 15),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal, 
+          child: DataTable(
+            headingRowColor: WidgetStateProperty.all(const Color(0xFFF9FAFB)),
+            border: TableBorder.all(color: const Color(0xFFE5E7EB), width: 1, borderRadius: BorderRadius.circular(4)),
+            columnSpacing: 20,
+            columns: [
+              const DataColumn(label: Text("Month")),
+              ...sortedTickers.map((ticker) => DataColumn(label: Text(ticker))).toList(),
+            ],
+            rows: p.monthPriceRows.map((row) => DataRow(cells: [
+              DataCell(Text(DateFormat('yyyy-MM').format(row.month))),
+              ...sortedTickers.map((ticker) {
+                if (!row.prices.containsKey(ticker)) {
+                  return DataCell(Text("—", style: TextStyle(color: Colors.grey[400])));
+                }
+                double price = row.prices[ticker]!;
+                DateTime tradingDate = row.tradingDates[ticker]!;
+                String tradingDateStr = DateFormat('yyyy-MM-dd').format(tradingDate);
+                return DataCell(
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(f.format(price), style: const TextStyle(fontWeight: FontWeight.bold)),
+                      Text(tradingDateStr, style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+                    ],
+                  ),
+                );
+              }).toList(),
+            ])).toList()
+          )
+        ),
       ],
     );
   }

@@ -23,6 +23,7 @@ class SwpPortfolioProvider extends ChangeNotifier {
   Map<String, List<ChartPoint>> swpPortfolioValueData = {};
   Map<String, List<ChartPoint>> swpWithdrawalData = {};
   List<SwpBreakdownRow> breakdownRows = [];
+  List<SwpMonthPriceRow> monthPriceRows = [];
 
   DateTime get startMonth => _startMonth;
   DateTime get endMonth => _endMonth;
@@ -66,6 +67,7 @@ class SwpPortfolioProvider extends ChangeNotifier {
     List<ChartPoint> valueData = [];
     List<ChartPoint> withdrawData = [];
     Map<String, double> u = Map.from(unitsByTicker);
+    List<SwpMonthPriceRow> localMonthPrices = []; // Track prices for this calculation
 
     // FIRST: Add initial row for start of first month
     DateTime firstMonthStart = DateTime.utc(months[0].year, months[0].month, 1, 12, 0, 0);
@@ -88,16 +90,36 @@ class SwpPortfolioProvider extends ChangeNotifier {
       int nextMonth = month == 12 ? 1 : month + 1;
       int nextYear = month == 12 ? year + 1 : year;
       
-      // Create date as: new Date(year, nextMonth, 0) which gives last day of current month
-      // In Dart: DateTime(year, nextMonth, 0) doesn't work, so we use (year, nextMonth, 1) then subtract 1 day
-      DateTime firstOfNextMonth = DateTime.utc(nextYear, nextMonth, 1);
-      DateTime calendarMonthEnd = firstOfNextMonth.subtract(const Duration(days: 1));
+      // For finding trading days: use midnight to include the actual month-end date if it's a trading day
+      DateTime calendarMonthEndForTradingDayLookup = DateTime.utc(
+        nextYear,
+        nextMonth,
+        0,
+        0, // Midnight UTC - to catch trading days on the actual month-end
+      );
+      
+      // For charts/display: use noon UTC (React compatibility)
+      DateTime calendarMonthEndForDisplay = DateTime.utc(
+        nextYear,
+        nextMonth,
+        0,
+        12, // 🔥 match React (noon UTC)
+      );
+      
+      Map<String, double> monthPrices = {}; // ticker -> price for this month
+      Map<String, DateTime> monthTradingDates = {}; // ticker -> trading date used
       
       double portfolioValue = 0;
-      // Calculate portfolio value using filled data at calendar month-end (midnight UTC)
+      // MONTH-END PRICE LOGIC:
+      // If calendar month-end (e.g., May 31) is a trading day → use that price
+      // If calendar month-end is weekend/holiday → use next available trading day price
       u.forEach((ticker, units) {
         if (priceData.containsKey(ticker)) {
-          double price = _getPrice(priceData[ticker], calendarMonthEnd);
+          // Look for trading days at midnight to catch the actual month-end date
+          double price = _getPriceOnOrAfter(priceData[ticker], calendarMonthEndForTradingDayLookup);
+          DateTime? tradingDate = _getFirstTradingDayOnOrAfter(priceData[ticker], calendarMonthEndForTradingDayLookup);
+          monthPrices[ticker] = price;
+          monthTradingDates[ticker] = tradingDate ?? calendarMonthEndForDisplay;
           double tickerValue = units * price;
           portfolioValue += tickerValue;
         }
@@ -118,11 +140,20 @@ class SwpPortfolioProvider extends ChangeNotifier {
         double ratio = withdrawAmount / portfolioValue;
         u.updateAll((ticker, units) => units * (1 - ratio));
       }
-      // Use calendar month end for the chart point
-      valueData.add(ChartPoint(calendarMonthEnd, portfolioValue - withdrawAmount));
-      withdrawData.add(ChartPoint(calendarMonthEnd, withdrawAmount));
+      
+      // Store month-end prices
+      localMonthPrices.add(SwpMonthPriceRow(
+        month: calendarMonthEndForDisplay,
+        prices: monthPrices,
+        tradingDates: monthTradingDates,
+      ));
+      
+      // Use calendar month end for the chart point (display time: noon UTC for React compatibility)
+      valueData.add(ChartPoint(calendarMonthEndForDisplay, portfolioValue - withdrawAmount));
+      withdrawData.add(ChartPoint(calendarMonthEndForDisplay, withdrawAmount));
     }
     swpWithdrawalData[key] = withdrawData;
+    monthPriceRows = localMonthPrices; // Store for display
     return valueData;
   }
 
@@ -174,10 +205,11 @@ class SwpPortfolioProvider extends ChangeNotifier {
       Map<String, double> initialUnits = {};
       for (var e in corpusEntries) {
         final tName = e.ticker.trim().toUpperCase();
-        if (priceDataByTicker.containsKey(tName)) {
+        if (originalTradingDays.containsKey(tName)) {
           // Use calendar month start (1st at 12:00 UTC) for initial investment date
+          // This will use the last trading day on or before the 1st (skips weekends/holidays)
           DateTime investDate = DateTime.utc(months.first.year, months.first.month, 1, 12, 0, 0);
-          double p = _getPrice(priceDataByTicker[tName], investDate);
+          double p = _getPrice(originalTradingDays[tName], investDate);
           if (p > 0) {
             initialUnits[tName] = (double.tryParse(e.amount) ?? 0) / p;
           }
@@ -186,9 +218,9 @@ class SwpPortfolioProvider extends ChangeNotifier {
 
       if (initialUnits.isEmpty) throw "Initial portfolio value is zero.";
 
-      // RUN CALCULATIONS
-      swpPortfolioValueData['Strategy A'] = _calculateSwpLogic(strategyA, initialUnits, months, priceDataByTicker, 'Strategy A');
-      swpPortfolioValueData['Strategy B'] = _calculateSwpLogic(strategyB, initialUnits, months, priceDataByTicker, 'Strategy B');
+      // RUN CALCULATIONS - Use originalTradingDays (skip weekends/holidays automatically)
+      swpPortfolioValueData['Strategy A'] = _calculateSwpLogic(strategyA, initialUnits, months, originalTradingDays, 'Strategy A');
+      swpPortfolioValueData['Strategy B'] = _calculateSwpLogic(strategyB, initialUnits, months, originalTradingDays, 'Strategy B');
 
 
       final valA = swpPortfolioValueData['Strategy A'];

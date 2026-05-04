@@ -33,3 +33,15 @@ class SwpBreakdownRow {
     required this.strategyBCumulative,
   });
 }
+
+class SwpMonthPriceRow {
+  final DateTime month;
+  final Map<String, double> prices; // ticker -> price
+  final Map<String, DateTime> tradingDates; // ticker -> actual trading date used
+
+  SwpMonthPriceRow({
+    required this.month,
+    required this.prices,
+    required this.tradingDates,
+  });
+}
